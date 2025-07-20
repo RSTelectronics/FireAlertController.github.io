@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Fire Alert Controller</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            text-align: center;
+            font-weight: bold;
+        }
+
+        .connected {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        .disconnected {
+            background-color: #f44336;
+            color: white;
+        }
+
+        .form-group {
+            margin: 15px 0;
+            padding: 10px;
+            background-color: #f9f9f97f;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        input,
+        select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+
+        button {
+            background-color: #2196F3;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 16px;
+        }
+
+        button:hover {
+            background-color: #0b7dda;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .test-section {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+        }
+
+        #log {
+            background-color: #333;
+            color: #0f0;
+            padding: 10px;
+            border-radius: 5px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+
+        .motor-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>ESP32 Fire Alert Controller V202507201622</h1>
+
+        <div id="status" class="status disconnected">
+            未接続
+        </div>
+
+        <button id="connectBtn" onclick="connect()">接続</button>
+        <button id="disconnectBtn" onclick="disconnect()" disabled>切断</button>
+
+        <h2>設定</h2>
+
+        <div class="form-group">
+            <label for="apiKey">FIRMS API キー:</label>
+            <input type="text" id="apiKey" placeholder="API キーを入力">
+        </div>
+
+        <div class="form-group">
+            <label for="gasurl">データ処理用GAS WEBアプリ URL : </label>
+            <input type="text" id="gasurl" placeholder="GAS WEBアプリのURLを入力" >
+        </div>
+
+        <div class="form-group">
+            <label for="country">監視する国:</label>
+            <select id="country">
+                <option value="JPN">日本</option>
+                <option value="USA">アメリカ</option>
+                <option value="CHN">中国</option>
+                <option value="KOR">韓国</option>
+                <option value="AUS">オーストラリア</option>
+                <option value="CAN">カナダ</option>
+                <option value="BRA">ブラジル</option>
+                <option value="RUS">ロシア</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="ssid">WiFi SSID:</label>
+            <input type="text" id="ssid" placeholder="WiFi SSIDを入力">
+        </div>
+
+        <div class="form-group">
+            <label for="password">WiFi パスワード:</label>
+            <input type="password" id="password" placeholder="WiFi パスワードを入力">
+        </div>
+
+        <div class="form-group">
+            <label for="motorSpeed">モーター速度: <span id="motorSpeedValue">0</span>%</label>
+            <input type="range" id="motorSpeed" min="-100" max="100" value="0">
+        </div>
+
+        <script>
+            document.getElementById('motorSpeed').addEventListener('input', function (e) {
+                document.getElementById('motorSpeedValue').textContent = e.target.value;
+            });
+        </script>
+
+        <div class="form-group">
+            <label for="OperationInterval">通常モード時データ取得間隔(ミリ秒):</label>
+            <input type="number" id="OperationInterval" min="10000" max="3600000" value="60000"
+                placeholder="デフォルトは60000ミリ秒(10分)">
+        </div>
+
+        <button onclick="sendSettings()">設定を送信</button>
+        <button onclick="getSettings()">設定を読み出す</button>
+
+        <div class="test-section">
+            <h3>操作メニュー</h3>
+            <div class="motor-control">
+                <button onclick="testMotor(true)">モーター試運転開始</button>
+                <button onclick="testMotor(false)">モーター試運転停止</button>
+            </div>
+            <button onclick="testWifi()">WiFi接続テスト</button>
+            <button onclick="restartDevice()">デバイスを再起動</button>
+            <button onclick="eraseSettings()" style="background-color: #f44336;">全設定を初期化</button>
+        </div>
+
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let device = null;
+        let characteristic = null;
+        let isConnected = false;
+
+        function log(message) {
+            const logElement = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logElement.innerHTML += `[${timestamp}] ${message}\n`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        async function connect() {
+            try {
+                log('デバイスを検索中...');
+                log('\n');
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b'] }]
+                });
+
+                log('接続中...');
+                log('\n');
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
+                characteristic = await service.getCharacteristic('beb5483e-36e1-4688-b7f5-ea07361b26a8');
+
+                // 通知を設定
+                characteristic.addEventListener('characteristicvaluechanged', handleNotification);
+                await characteristic.startNotifications();
+
+                isConnected = true;
+                updateStatus(true);
+                log('接続成功');
+                log('デバイス名: ' + device.name + '\n');
+            } catch (error) {
+                log('接続エラー: ' + error);
+                log('\n');
+                updateStatus(false);
+            }
+        }
+
+        async function disconnect() {
+            if (device && device.gatt.connected) {
+                await device.gatt.disconnect();
+            }
+            isConnected = false;
+            updateStatus(false);
+            log('切断しました\n');
+        }
+
+        function updateStatus(connected) {
+            const statusElement = document.getElementById('status');
+            const connectBtn = document.getElementById('connectBtn');
+            const disconnectBtn = document.getElementById('disconnectBtn');
+
+            if (connected) {
+                statusElement.textContent = '接続済み';
+                statusElement.className = 'status connected';
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            } else {
+                statusElement.textContent = '未接続';
+                statusElement.className = 'status disconnected';
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+            }
+        }
+        async function getSettings() {
+            if (!isConnected) {
+                log('エラー: デバイスが接続されていません');
+                return;
+            }
+            log('設定値の読み出しを要求します...');
+            await sendCommand('GET:SETTINGS');
+        }
+
+        function handleNotification(event) {
+            const value = new TextDecoder().decode(event.target.value);
+            log('受信: ' + value); // 受信ログは常に表示
+
+            // STATUS:で始まるメッセージか確認
+            if (value.startsWith('STATUS:')) {
+                const parts = value.split(':');
+                const key = parts[1];
+                // 3番目以降のパーツを結合して値とする（APIキーなどにコロンが含まれる場合に対応）
+                const val = parts.slice(2).join(':');
+
+                switch (key) {
+                    case 'API_KEY':
+                        document.getElementById('apiKey').value = val;
+                        break;
+                    case 'GAS_URL':
+                        document.getElementById('gasurl').value = val;
+                        break;
+                    case 'COUNTRY':
+                        document.getElementById('country').value = val;
+                        break;
+                    case 'SSID':
+                        document.getElementById('ssid').value = val;
+                        break;
+                    case 'MOTOR_SPEED':
+                        const speed = parseInt(val);
+                        document.getElementById('motorSpeed').value = speed;
+                        document.getElementById('motorSpeedValue').textContent = speed;
+                        break;
+                    case 'INTERVAL':
+                        const intervalSeconds = parseInt(val);
+                        document.getElementById('OperationInterval').value = intervalSeconds;
+                        break;
+                }
+            }
+        }
+
+
+
+        async function sendCommand(command) {
+            if (!isConnected || !characteristic) {
+                log('エラー: デバイスが接続されていません');
+                return;
+            }
+
+            try {
+                const encoder = new TextEncoder();
+                await characteristic.writeValue(encoder.encode(command));
+                log('送信: ' + command * '\n');
+            } catch (error) {
+                log('送信エラー: ' + error + '\n');
+            }
+        }
+
+        async function sendSettings() {
+            var apiKey = document.getElementById('apiKey').value;
+            var gasurl = document.getElementById('gasurl').value;
+            var country = document.getElementById('country').value;
+            var ssid = document.getElementById('ssid').value;
+            var password = document.getElementById('password').value;
+            var motorSpeed = document.getElementById('motorSpeed').value;
+            var operationInterval = document.getElementById('OperationInterval').value;
+
+            if (!apiKey || !ssid || !password || !motorSpeed || !country || !operationInterval || !gasurl) {
+                //alert('すべての必須項目を入力してください');
+                alert('入力されていない項目についてはすでに設定されている値が使用されます。');
+                apiKey = apiKey || 'NULL';
+                gasurl = gasurl || 'NULL';
+                country = country || 'NULL';
+                ssid = ssid || 'NULL';
+                password = password || 'NULL';
+                motorSpeed = motorSpeed || 'NULL';
+                operationInterval = operationInterval || 'NULL';
+            }
+
+            await sendCommand(`SET:API:${apiKey}`);
+            await sendCommand(`SET:GAS:${gasurl}`);
+            await sendCommand(`SET:COUNTRY:${country}`);
+            await sendCommand(`SET:WIFI:${ssid}:${password}`);
+            await sendCommand(`SET:SPEED:${motorSpeed}`);
+            await sendCommand(`SET:INTERVAL:${operationInterval}`);
+
+            log('設定を送信しました\n');
+        }
+
+        async function testMotor(start) {
+            if (start) {
+                await sendCommand('TEST:MOTOR:START');
+            } else {
+                await sendCommand('TEST:MOTOR:STOP');
+            }
+        }
+
+        async function testWifi() {
+            await sendCommand('TEST:WIFI');
+        }
+
+        async function testAPI() {
+            await sendCommand('TEST:API');
+        }
+
+        async function restartDevice() {
+            // 確認ダイアログを表示
+            if (confirm('デバイスを本当に再起動しますか？')) {
+                log('再起動コマンドを送信します...');
+                await sendCommand('SYSTEM:RESTART');
+            } else {
+                log('再起動をキャンセルしました。');
+            }
+        }
+
+        async function eraseSettings() {
+            // 警告メッセージを表示して、ユーザーの意思を再度確認する
+            const confirmation = confirm('警告: 本当にすべての設定を削除して、出荷時の状態に戻しますか？この操作は元に戻せません。');
+
+            if (confirmation) {
+                log('全設定の初期化コマンドを送信します...');
+                await sendCommand('SYSTEM:ERASE_SETTINGS');
+
+                // ユーザーに分かりやすくするため、画面上の入力欄もクリアする
+                document.getElementById('apiKey').value = '';
+                document.getElementById('gasurl').value = '';
+                document.getElementById('country').value = 'JPN'; // デフォルト値に戻す
+                document.getElementById('ssid').value = '';
+                document.getElementById('password').value = '';
+                document.getElementById('motorSpeed').value = 50;
+                document.getElementById('motorSpeedValue').textContent = 50;
+                document.getElementById('OperationInterval').value = 60;
+
+                log('デバイスの設定が初期化されました。画面もリセットしました。');
+            } else {
+                log('設定の初期化はキャンセルされました。');
+            }
+        }
+
+        // ページ離脱時に切断
+        window.addEventListener('beforeunload', () => {
+            if (isConnected) {
+                disconnect();
+            }
+        });
+    </script>
+</body>
+
+</html>
